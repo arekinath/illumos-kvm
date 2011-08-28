@@ -1968,6 +1968,21 @@ kvm_close(dev_t dev, int flag, int otyp, cred_t *cred)
 	return (0);
 }
 
+static void
+__print_reg_vals(void)
+{
+        unsigned int cs, gs, fs, ss;
+	struct regs *rp = (struct regs *) (ttolwp(curthread)->lwp_regs);
+
+        __asm__ volatile ("mov %%cs, %0\n" : "=r"(cs));
+        __asm__ volatile ("mov %%gs, %0\n" : "=r"(gs));
+        __asm__ volatile ("mov %%fs, %0\n" : "=r"(fs));
+        __asm__ volatile ("mov %%ss, %0\n" : "=r"(ss));
+
+	cmn_err(CE_NOTE, "kvm: REGS %p REGISTERS %%cs %x %%gs %x %%fs %x %%ss %x",
+	    rp, cs, gs, fs, ss);
+}
+
 static int
 kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 {
@@ -1976,6 +1991,9 @@ kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 	kvm_devstate_t *ksp;
 	void *argp = (void *)arg;
 	struct kvm_pit_config pit;
+
+	cmn_err(CE_NOTE, "kvm: %s cmd %d", __func__, cmd);
+	__print_reg_vals();
 
 	minor = getminor(dev);
 	ksp = ddi_get_soft_state(kvm_state, minor);
@@ -2085,6 +2103,9 @@ kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 
 		kmem_free(buf, ioctl->size);
 
+		cmn_err(CE_NOTE, "kvm: %s return from tab = %d", __func__,
+		    (rval < 0 ? -rval : rval));
+		__print_reg_vals();
 		return (rval < 0 ? -rval : rval);
 	}
 
@@ -2694,9 +2715,15 @@ kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 		rval = EINVAL;  /* x64, others may do other things... */
 	}
 
-	if (*rv == -1)
+	if (*rv == -1) {
+		cmn_err(CE_NOTE, "kvm: %s return EINVAL 2", __func__);
+		__print_reg_vals();
 		return (EINVAL);
+	}
 
+	cmn_err(CE_NOTE, "kvm: %s return from switch = %d", __func__,
+	    (rval < 0 ? -rval : rval));
+	__print_reg_vals();
 	return (rval < 0 ? -rval : rval);
 }
 
