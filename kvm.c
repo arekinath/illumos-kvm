@@ -2010,12 +2010,6 @@ kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 	void *argp = (void *)arg;
 	struct kvm_pit_config pit;
 
-	/* XXX DEBUG? */
-	unsigned long long OLD_fsbase = read_msr(MSR_FS_BASE);
-
-	cmn_err(CE_NOTE, "kvm: %s cmd %d", __func__, cmd);
-	__print_reg_vals();
-
 	minor = getminor(dev);
 	ksp = ddi_get_soft_state(kvm_state, minor);
 	if (ksp == NULL)
@@ -2123,17 +2117,6 @@ kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 		}
 
 		kmem_free(buf, ioctl->size);
-
-		/* XXX DEBUG? */
-		wrmsrl(MSR_FS_BASE, OLD_fsbase);
-
-		cmn_err(CE_NOTE, "kvm: %s return from tab = %d", __func__,
-		    (rval < 0 ? -rval : rval));
-		__print_reg_vals();
-
-/* XXX
-		if (rval == 0 && cmd == 536915584)
-			debug_enter("JESUS CHRIST"); */
 
 		return (rval < 0 ? -rval : rval);
 	}
@@ -2745,14 +2728,9 @@ kvm_ioctl(dev_t dev, int cmd, intptr_t arg, int md, cred_t *cr, int *rv)
 	}
 
 	if (*rv == -1) {
-		cmn_err(CE_NOTE, "kvm: %s return EINVAL 2", __func__);
-		__print_reg_vals();
 		return (EINVAL);
 	}
 
-	cmn_err(CE_NOTE, "kvm: %s return from switch = %d", __func__,
-	    (rval < 0 ? -rval : rval));
-	__print_reg_vals();
 	return (rval < 0 ? -rval : rval);
 }
 
