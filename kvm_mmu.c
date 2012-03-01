@@ -133,6 +133,7 @@ typedef int (*mmu_parent_walk_fn) (struct kvm_vcpu *, struct kvm_mmu_page *);
 struct kmem_cache *pte_chain_cache;
 struct kmem_cache *rmap_desc_cache;
 struct kmem_cache *mmu_page_header_cache;
+struct kmem_cache *kvm_random_page_thing;
 
 static uint64_t shadow_trap_nonpresent_pte;
 static uint64_t shadow_notrap_nonpresent_pte;
@@ -318,7 +319,7 @@ out:
 }
 
 static void *
-mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
+mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
 {
 	if (mc->objects[--mc->nobjs].kpm_object)
 		return (mc->objects[mc->nobjs].kpm_object);
@@ -327,7 +328,7 @@ mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
 }
 
 static struct kvm_objects
-mmu_memory_page_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
+mmu_memory_page_cache_alloc(struct kvm_mmu_memory_cache *mc)
 {
 	return (mc->objects[--mc->nobjs]);
 }
@@ -335,8 +336,7 @@ mmu_memory_page_cache_alloc(struct kvm_mmu_memory_cache *mc, size_t size)
 static struct kvm_pte_chain *
 mmu_alloc_pte_chain(struct kvm_vcpu *vcpu)
 {
-	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_pte_chain_cache,
-	    sizeof (struct kvm_pte_chain)));
+	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_pte_chain_cache));
 }
 
 static void
@@ -348,8 +348,7 @@ mmu_free_pte_chain(struct kvm_pte_chain *pc)
 static struct kvm_rmap_desc *
 mmu_alloc_rmap_desc(struct kvm_vcpu *vcpu)
 {
-	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_rmap_desc_cache,
-	    sizeof (struct kvm_rmap_desc)));
+	return (mmu_memory_cache_alloc(&vcpu->arch.mmu_rmap_desc_cache));
 }
 
 static void
@@ -701,8 +700,8 @@ kvm_mmu_free_page(struct kvm *kvm, struct kvm_mmu_page *sp)
 {
 	ASSERT(mutex_owned(&kvm->mmu_lock));
 
-	kmem_free(sp->sptkma, PAGESIZE);
-	kmem_free(sp->gfnskma, PAGESIZE);
+	kmem_cache_free(kvm_random_page_thing, sp->sptkma);
+	kmem_cache_free(kvm_random_page_thing, sp->gfnskma);
 
 	mutex_enter(&kvm->kvm_avllock);
 	avl_remove(&kvm->kvm_avlmp, sp);
@@ -733,14 +732,11 @@ kvm_mmu_alloc_page(struct kvm_vcpu *vcpu, uint64_t *parent_pte)
 
 	ASSERT(mutex_owned(&vcpu->kvm->mmu_lock));
 
-	sp = mmu_memory_cache_alloc(&vcpu->arch.mmu_page_header_cache,
-	    sizeof (*sp));
-	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache,
-	    PAGESIZE);
+	sp = mmu_memory_cache_alloc(&vcpu->arch.mmu_page_header_cache);
+	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache);
 	sp->spt = kobj.kpm_object;
 	sp->sptkma = kobj.kma_object;
-	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache,
-	    PAGESIZE);
+	kobj = mmu_memory_page_cache_alloc(&vcpu->arch.mmu_page_cache);
 	sp->gfns = kobj.kpm_object;
 	sp->gfnskma = kobj.kma_object;
 	sp->kmp_avlspt = (uintptr_t)virt_to_page((caddr_t)sp->spt);
@@ -2829,7 +2825,7 @@ kvm_mmu_setup(struct kvm_vcpu *vcpu)
 static void
 free_mmu_pages(struct kvm_vcpu *vcpu)
 {
-	kmem_free(vcpu->arch.mmu.alloc_pae_root, PAGESIZE);
+	kmem_cache_free(kvm_random_page_thing, vcpu->arch.mmu.alloc_pae_root);
 }
 
 static void
@@ -2843,7 +2839,7 @@ static void
 mmu_free_memory_cache_page(struct kvm_mmu_memory_cache *mc)
 {
 	while (mc->nobjs)
-		kmem_free(mc->objects[--mc->nobjs].kma_object, PAGESIZE);
+		kmem_cache_free(kvm_random_page_thing, mc->objects[--mc->nobjs].kma_object);
 }
 
 static void
@@ -2924,23 +2920,30 @@ mmu_destroy_caches(void)
 		kmem_cache_destroy(rmap_desc_cache);
 	if (mmu_page_header_cache)
 		kmem_cache_destroy(mmu_page_header_cache);
+	if (kvm_random_page_thing)
+		kmem_cache_destroy(kvm_random_page_thing);
 }
 
 int
 kvm_mmu_module_init(void)
 {
+	if ((kvm_random_page_thing = kmem_cache_create("kvm_random_page_thing",
+	    PAGESIZE, PAGESIZE, zero_constructor, NULL, NULL,
+	    (void *)PAGESIZE, NULL, 0)) == NULL)
+		goto nomem;
+
 	if ((pte_chain_cache = kmem_cache_create("kvm_pte_chain",
-	    sizeof (struct kvm_pte_chain), 0, zero_constructor, NULL, NULL,
+	    sizeof (struct kvm_pte_chain), PAGESIZE, zero_constructor, NULL, NULL,
 	    (void *)sizeof (struct kvm_pte_chain), NULL, 0)) == NULL)
 		goto nomem;
 
 	if ((rmap_desc_cache = kmem_cache_create("kvm_rmap_desc",
-	    sizeof (struct kvm_rmap_desc), 0, zero_constructor, NULL, NULL,
+	    sizeof (struct kvm_rmap_desc), PAGESIZE, zero_constructor, NULL, NULL,
 	    (void *)sizeof (struct kvm_rmap_desc), NULL, 0)) == NULL)
 		goto nomem;
 
 	if ((mmu_page_header_cache = kmem_cache_create("kvm_mmu_page_header",
-	    sizeof (struct kvm_mmu_page), 0, zero_constructor, NULL, NULL,
+	    sizeof (struct kvm_mmu_page), PAGESIZE, zero_constructor, NULL, NULL,
 	    (void *)sizeof (struct kvm_mmu_page), NULL, 0)) == NULL)
 		goto nomem;
 
@@ -3070,7 +3073,7 @@ alloc_page(int flag, void **kma_addr)
 	pfn_t pfn;
 	page_t *pp;
 
-	if ((page_addr = kmem_zalloc(PAGESIZE, flag)) == NULL)
+	if ((page_addr = kmem_cache_alloc(kvm_random_page_thing, flag)) == NULL)
 		return ((page_t *)NULL);
 
 	*kma_addr = page_addr;

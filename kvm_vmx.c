@@ -53,6 +53,7 @@ static int kvm_vmx_ept_required = 0;
 static int enable_unrestricted_guest = 1;
 static int emulate_invalid_guest_state = 0;
 static kmem_cache_t *kvm_vcpu_cache;
+static kmem_cache_t *kvm_vmcs_cache;
 
 #ifdef XXX_KVM_DECLARATION
 static unsigned long *vmx_io_bitmap_a;
@@ -1550,10 +1551,7 @@ alloc_kvm_area(void)
 	for (i = 0; i < ncpus; i++) {
 		struct vmcs *vmcs;
 
-		/* XXX the following assumes PAGESIZE allocations */
-		/* are PAGESIZE aligned.  We could enforce this */
-		/* via kmem_cache_create, but I'm lazy */
-		vmcs = kmem_zalloc(PAGESIZE, KM_SLEEP);
+		vmcs = kmem_cache_alloc(kvm_vmcs_cache, KM_SLEEP);
 		vmxarea[i] = vmcs;
 		current_vmcs[i] = vmcs;
 		pfn = hat_getpfnum(kas.a_hat, (caddr_t)vmcs);
@@ -1569,7 +1567,7 @@ alloc_kvm_area(void)
 static void
 free_vmcs(struct vmcs *vmcs)
 {
-	kmem_free(vmcs, PAGESIZE);
+	kmem_cache_free(kvm_vmcs_cache, vmcs);
 }
 
 static void
@@ -4310,7 +4308,7 @@ vmx_destroy_vcpu(struct kvm_vcpu *vcpu)
 
 	if (vmx->vmcs != NULL) {
 		__vcpu_clear(vmx);
-		kmem_free(vmx->vmcs, PAGESIZE);
+		kmem_cache_free(kvm_vmcs_cache, vmx->vmcs);
 		vmx->vmcs = NULL;
 	}
 	if (vmx->guest_msrs != NULL)
@@ -4344,10 +4342,9 @@ vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 
 	vmx->guest_msrs = kmem_zalloc(PAGESIZE, KM_SLEEP);
 
-	vmx->vmcs = kmem_zalloc(PAGESIZE, KM_SLEEP);
+	vmx->vmcs = kmem_cache_alloc(kvm_vmcs_cache, KM_SLEEP);
 
-	vmx->vmcs_pa = (hat_getpfnum(kas.a_hat, (caddr_t)vmx->vmcs) <<
-	    PAGESHIFT) | ((int64_t)(vmx->vmcs) & 0xfff);
+	vmx->vmcs_pa = kvm_va2pa((caddr_t)vmx->vmcs);
 
 	kpreempt_disable();
 
@@ -4364,7 +4361,7 @@ vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 
 	kpreempt_enable();
 	if (err)
-		vmx->vmcs = NULL;
+		goto free_vmcs;
 	if (vm_need_virtualize_apic_accesses(kvm))
 		if (alloc_apic_access_page(kvm) != 0)
 			goto free_vmcs;
@@ -4381,6 +4378,7 @@ vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 
 free_vmcs:
 	kmem_free(vmx->vmcs, PAGESIZE);
+	kmem_cache_free(kvm_vmcs_cache, vmx->vmcs);
 	vmx->vmcs = 0;
 	kmem_free(vmx->guest_msrs, PAGESIZE);
 	kvm_vcpu_uninit(&vmx->vcpu);
@@ -4393,7 +4391,7 @@ vmx_check_processor_compat(void *rtn)
 {
 	struct vmcs_config vmcs_conf;
 
-	if (setup_vmcs_config(&vmcs_conf) < 0)
+	if (setup_vmcs_config(&vmcs_conf) != 0)
 		*(int *)rtn |= EIO;
 	if (memcmp(&vmcs_config, &vmcs_conf, sizeof (struct vmcs_config))
 	    != 0) {
@@ -4619,6 +4617,11 @@ vmx_init(void)
 	    zero_constructor, NULL, NULL, (void *)(sizeof (struct vcpu_vmx)),
 	    NULL, 0);
 
+	kvm_vmcs_cache = kmem_cache_create("kvm_vmcs", PAGESIZE,
+	    (size_t)PAGESIZE,
+	    zero_constructor, NULL, NULL, (void *)PAGESIZE,
+	    NULL, 0);
+
 	if (kvm_vcpu_cache == NULL) {
 		r = ENOMEM;
 		goto out;
@@ -4668,6 +4671,7 @@ vmx_init(void)
 
 out:
 	kmem_cache_destroy(kvm_vcpu_cache);
+	kmem_cache_destroy(kvm_vmcs_cache);
 
 	return (r);
 }
@@ -4680,5 +4684,6 @@ vmx_fini(void)
 		kmem_free(vmx_vpid_bitmap, sizeof (ulong_t) *
 		    vpid_bitmap_words);
 	}
+	kmem_cache_destroy(kvm_vmcs_cache);
 	kmem_cache_destroy(kvm_vcpu_cache);
 }
