@@ -42,6 +42,7 @@
 #include <sys/cpuvar.h>
 #include <sys/segments.h>
 #include <sys/mdb_modapi.h>
+#include <sys/avl.h>
 
 #include "kvm_msr.h"
 #include "kvm_vmx.h"
@@ -239,6 +240,192 @@ kvm_mdb_gpa2qva(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (DCMD_OK);
 }
 
+
+
+#define	PT64_BASE_ADDR_MASK (((1ULL << 52) - 1) & ~(uint64_t)(PAGESIZE-1))
+
+struct kvm_ph_cb_arg {
+	uintptr_t mmu_page_addr;
+	uintptr_t page_addr;
+};
+
+static int
+kvm_ph_cb(uintptr_t addr, const void *a, void *b)
+{
+	struct kvm_ph_cb_arg *arg = b;
+	struct kvm_mmu_page page;
+
+	if (mdb_vread(&page, sizeof (page), addr) == -1) {
+		mdb_printf("FAILED TO READ KVM_MMU_PAGE\n");
+		return (DCMD_ERR);
+	}
+
+	/* mdb_printf("    unsync: 0x%d\n", page.unsync);*/
+	if (page.kmp_avlspt == arg->page_addr) {
+		arg->mmu_page_addr = addr;
+		/*mdb_printf("...found avl entry %p for spt page %p\n", addr, arg->page_addr);*/
+	}
+	return (DCMD_OK);
+}
+
+extern uintptr_t mdb_pfn2page(pfn_t pfn); /* XXX */
+
+/*
+ * mimic page_header() in kvm_mmu.c
+ */
+static uintptr_t
+kvm_mdb_page_header(uintptr_t kvmaddr, hpa_t shadow_page)
+{
+	struct kvm_ph_cb_arg arg;
+	uintptr_t pfn;
+
+	arg.mmu_page_addr = 0;
+
+	/* translate hpa to pfn */
+	pfn = shadow_page >> PAGESHIFT;
+	//mdb_printf(" # # # pfn: 0x%p\n", pfn);
+
+	/* translate pfn to *page_t */
+	if ((arg.page_addr = mdb_pfn2page(pfn)) == 0) {
+		//mdb_printf("COULD NOT FIND PAGE_T FOR PFN %p\n", pfn);
+		return (DCMD_ERR);
+	}
+
+	if (mdb_pwalk("avl", kvm_ph_cb, &arg,
+	    (uintptr_t) kvmaddr + offsetof(struct kvm, kvm_avlmp)) == -1) {
+		mdb_printf("   could not! error from mdb_pwalk\n");
+	}
+	if (arg.mmu_page_addr == 0) {
+		//mdb_printf("DID NOT FIND PRIVATE DATA FOR SHADOW PAGE %p\n", shadow_page);
+		return (0);
+	}
+
+	return (arg.mmu_page_addr);
+}
+
+static struct kvm_mmu_page*
+kvm_mdb_see_kvm_mmu_page(uintptr_t addr)
+{
+	static uintptr_t lastaddr = 0;
+	static struct kvm_mmu_page page;
+
+	if (lastaddr != addr) {
+		//mdb_printf(" * * * seeing page: 0x%p\n", addr);
+		mdb_vread(&page, sizeof (page), addr);
+	}
+	lastaddr = addr;
+
+	return &page;
+}
+
+static void
+kvm_mdb_examine_spt_ent(uintptr_t kvmaddr, uintptr_t sptkma, int indent)
+{
+	int i;
+	uint64_t pte[PAGESIZE / sizeof(uint64_t)];
+	char ind[40];
+
+	if (mdb_vread(&pte, sizeof(pte), sptkma) == -1) {
+		mdb_printf("ERROR: could not read SPT PTE\n");
+		return;
+	}
+
+	for (i = 0; i < indent && i < 39; i++) {
+		ind[i] = ' ';
+	}
+	ind[i] = '\0';
+
+	for (i = 0; i < PAGESIZE / sizeof(uint64_t); i++) {
+		if ((pte[i] & 0x27) == 0x27) {
+			uintptr_t pagehdr = kvm_mdb_page_header(kvmaddr,
+			    (pte[i] & PT64_BASE_ADDR_MASK));
+			uintptr_t sptkma;
+
+			mdb_printf("%s[%d]  0x%p  (hpa 0x%p)\n", ind, i, pte[i],
+			    (pte[i] & PT64_BASE_ADDR_MASK) >> PAGESHIFT);
+			if (pagehdr) {
+				sptkma = (uintptr_t)kvm_mdb_see_kvm_mmu_page(pagehdr)->sptkma;
+				kvm_mdb_examine_spt_ent(kvmaddr, sptkma, indent + 4);
+			} else {
+				mdb_printf("%s          ^^-- ERROR: no private data in avltree\n", ind);
+			}
+		}
+	}
+	mdb_printf("\n");
+}
+
+static int
+kvm_mdb_mmuinfo(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
+{
+	struct kvm kvm;
+	struct kvm_vcpu *vcpu;
+	struct kvm_mmu *mmu;
+	int i;
+	uintptr_t ptr;
+
+	if (argc > 1)
+		return (DCMD_USAGE);
+
+	if (mdb_vread(&kvm, sizeof (struct kvm), addr) == -1) {
+		mdb_warn("couldn't read kvm at %p", addr);
+		return (DCMD_ERR);
+	}
+
+	/* XXX assume, for now, that we're interested in the first VCPU */
+	vcpu = mdb_alloc(sizeof (struct kvm_vcpu), UM_SLEEP | UM_GC);
+
+	if (mdb_vread(vcpu, sizeof (struct kvm_vcpu),
+	    (uintptr_t)kvm.vcpus[0]) == -1) {
+		mdb_warn("couldn't read kvm_vcpu at %p",
+		    kvm.vcpus[0]);
+		return (DCMD_ERR);
+	}
+
+/*
+	if (DCMD_HDRSPEC(flags))
+		mdb_printf("%s %7s %5s\n", "CHIP", "PORT", "GSI");*/
+
+
+	mmu = &vcpu->arch.mmu;
+	mdb_printf("\nMMU Info -- mmu: 0x%p\n", mmu);
+	mdb_printf("root_hpa: 0x%p (%s)\n", mmu->root_hpa,
+	    mmu->root_hpa == INVALID_PAGE ? "INVALID" : "valid");
+	mdb_printf("root_level: %s\n",
+	    mmu->root_level == 0x1 ? "PAGE_TABLE (0x1)" :
+	    mmu->root_level == 0x2 ? "PAGE_DIR (0x2)" :
+	    mmu->root_level == 0x3 ? "PDPE (0x3)" :
+	    mmu->root_level == 0x4 ? "PT64_ROOT (0x4)" : "?");
+	mdb_printf("pae_root... 0x%p\n", (uintptr_t) mmu->pae_root);
+	for (i = 0; i < 4; i++) {
+		hpa_t root;
+		if (mdb_vread(&root, sizeof(root), (uintptr_t)(mmu->pae_root + i)) == -1) {
+			mdb_printf("  pae_root[%d]: could not read!\n", i);
+		} else {
+			mdb_printf("  pae_root[%d]: 0x%p (%s)\n", i,
+			    root & PT64_BASE_ADDR_MASK,
+			    root == INVALID_PAGE ? "INVALID" : "valid");
+		}
+	}
+	mdb_printf("\n");
+
+	mdb_printf("\nPage Private for MMU Root:\n");
+	ptr = kvm_mdb_page_header(addr, mmu->root_hpa);
+	if (ptr == 0) {
+		mdb_printf("ERROR: could not find page private for MMU Root\n\n");
+		return (DCMD_ERR);
+	}
+	mdb_printf("  page_private  0x%p  sptkma 0x%p\n", ptr,
+	    kvm_mdb_see_kvm_mmu_page(ptr)->sptkma);
+
+	kvm_mdb_examine_spt_ent(addr, (uintptr_t)kvm_mdb_see_kvm_mmu_page(ptr)->sptkma, 4);
+
+	/* kvm_mmu_page *sp = page_header() ? */
+	/* mmu_sync_children(vcpu, sp) */
+
+	mdb_printf("\n");
+	return (DCMD_OK);
+}
+
 static int
 kvm_mdb_gsiroutes(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 {
@@ -398,6 +585,8 @@ static const mdb_dcmd_t dcmds[] = {
 	    "to a QEMU virtual address", kvm_mdb_gpa2qva },
 	{ "kvm_gsiroutes", NULL, "print out the global system "
 	    "interrupt (GSI) routing table", kvm_mdb_gsiroutes },
+	{ "kvm_mmuinfo", NULL, "print info about the mmu for a kvm",
+	    kvm_mdb_mmuinfo },
 	{ "kvm_ringbuf_entry", NULL, "print out a kvm ring buffer entry",
 	    kvm_mdb_ringbuf_entry },
 	{ NULL }
