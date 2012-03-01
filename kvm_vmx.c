@@ -49,7 +49,7 @@ static int bypass_guest_pf = 1;
 static int enable_vpid = 1;
 static int flexpriority_enabled = 1;
 static int enable_ept = 1;
-static int kvm_vmx_ept_required = 1;
+static int kvm_vmx_ept_required = 0;
 static int enable_unrestricted_guest = 1;
 static int emulate_invalid_guest_state = 0;
 static kmem_cache_t *kvm_vcpu_cache;
