@@ -55,23 +55,10 @@ static int emulate_invalid_guest_state = 0;
 static kmem_cache_t *kvm_vcpu_cache;
 static kmem_cache_t *kvm_vmcs_cache;
 
-#ifdef XXX_KVM_DECLARATION
-static unsigned long *vmx_io_bitmap_a;
-static unsigned long *vmx_io_bitmap_b;
-static unsigned long *vmx_msr_bitmap_legacy;
-static unsigned long *vmx_msr_bitmap_longmode;
-#else
-/* make these arrays to try to force into low 4GB memory... */
-/* also need to be aligned... */
-__attribute__((__aligned__(PAGESIZE)))static unsigned long
-    vmx_io_bitmap_a[PAGESIZE / sizeof (unsigned long)];
-__attribute__((__aligned__(PAGESIZE)))static unsigned long
-    vmx_io_bitmap_b[PAGESIZE / sizeof (unsigned long)];
-__attribute__((__aligned__(PAGESIZE)))static unsigned long
-    vmx_msr_bitmap_legacy[PAGESIZE / sizeof (unsigned long)];
-__attribute__((__aligned__(PAGESIZE)))static unsigned long
-    vmx_msr_bitmap_longmode[PAGESIZE / sizeof (unsigned long)];
-#endif
+static unsigned long *vmx_io_bitmap_a = NULL;
+static unsigned long *vmx_io_bitmap_b = NULL;
+static unsigned long *vmx_msr_bitmap_legacy = NULL;
+static unsigned long *vmx_msr_bitmap_longmode = NULL;
 
 static struct vmcs **vmxarea;  /* 1 per cpu */
 static struct vmcs **current_vmcs;
@@ -4594,6 +4581,25 @@ struct kvm_x86_ops vmx_x86_ops = {
 	.rdtscp_supported = vmx_rdtscp_supported
 };
 
+static ddi_dma_attr_t low_4gb_dma_attr = {
+        DMA_ATTR_V0,            /* version of this structure */
+        0,                      /* lowest usable address */
+        0x100000000ULL,         /* highest usable address (4GB) */
+        0x7fffffff,             /* maximum DMAable byte count */
+        PAGESIZE,               /* alignment in bytes */
+        0x7ff,                  /* burst sizes (any?) */
+        1,                      /* minimum transfer */
+        0xffffffffU,            /* maximum transfer */
+        0xffffffffffffffffULL,  /* maximum segment length */
+        1,                      /* maximum number of segments */
+        1,                      /* granularity */
+        DDI_DMA_FLAGERR,        /* dma_attr_flags */
+};
+
+/* XXX: This is a mess */
+extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
+extern void contig_free(void *, size_t);
+
 int
 vmx_init(void)
 {
@@ -4603,6 +4609,33 @@ vmx_init(void)
 
 	for (i = 0; i < NR_VMX_MSR; ++i)
 		kvm_define_shared_msr(i, vmx_msr_index[i]);
+
+	/*
+	 * As hideous as this is, it may allow us to force these
+	 * structures into the first 4GB of physical RAM?  Not
+	 * 100% positive this is a requirement, but it was alluded
+	 * to in some comments from Joyent.
+	 */
+	vmx_io_bitmap_a = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	if (vmx_io_bitmap_a == NULL) {
+		r = ENOMEM;
+		goto out;
+	}
+	vmx_io_bitmap_b = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	if (vmx_io_bitmap_b == NULL) {
+		r = ENOMEM;
+		goto out;
+	}
+	vmx_msr_bitmap_legacy = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	if (vmx_msr_bitmap_legacy == NULL) {
+		r = ENOMEM;
+		goto out;
+	}
+	vmx_msr_bitmap_longmode = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	if (vmx_msr_bitmap_longmode == NULL) {
+		r = ENOMEM;
+		goto out;
+	}
 
 	if (enable_vpid) {
 		vpid_bitmap_words = howmany(VMX_NR_VPIDS, 64);
@@ -4670,6 +4703,15 @@ vmx_init(void)
 
 
 out:
+	if (vmx_io_bitmap_a != NULL)
+		contig_free(vmx_io_bitmap_a, PAGESIZE);
+	if (vmx_io_bitmap_b != NULL)
+		contig_free(vmx_io_bitmap_b, PAGESIZE);
+	if (vmx_msr_bitmap_legacy != NULL)
+		contig_free(vmx_msr_bitmap_legacy, PAGESIZE);
+	if (vmx_msr_bitmap_longmode != NULL)
+		contig_free(vmx_msr_bitmap_longmode, PAGESIZE);
+
 	kmem_cache_destroy(kvm_vcpu_cache);
 	kmem_cache_destroy(kvm_vmcs_cache);
 
@@ -4684,6 +4726,12 @@ vmx_fini(void)
 		kmem_free(vmx_vpid_bitmap, sizeof (ulong_t) *
 		    vpid_bitmap_words);
 	}
+
+	contig_free(vmx_io_bitmap_a, PAGESIZE);
+	contig_free(vmx_io_bitmap_b, PAGESIZE);
+	contig_free(vmx_msr_bitmap_legacy, PAGESIZE);
+	contig_free(vmx_msr_bitmap_longmode, PAGESIZE);
+
 	kmem_cache_destroy(kvm_vmcs_cache);
 	kmem_cache_destroy(kvm_vcpu_cache);
 }
