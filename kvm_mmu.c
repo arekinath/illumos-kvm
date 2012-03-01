@@ -321,6 +321,7 @@ out:
 static void *
 mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
 {
+	ASSERT(mc->nobjs); /* XXX JMC */
 	if (mc->objects[--mc->nobjs].kpm_object)
 		return (mc->objects[mc->nobjs].kpm_object);
 	else
@@ -330,6 +331,7 @@ mmu_memory_cache_alloc(struct kvm_mmu_memory_cache *mc)
 static struct kvm_objects
 mmu_memory_page_cache_alloc(struct kvm_mmu_memory_cache *mc)
 {
+	ASSERT(mc->nobjs); /* XXX JMC */
 	return (mc->objects[--mc->nobjs]);
 }
 
@@ -695,10 +697,27 @@ rmap_write_protect(struct kvm *kvm, uint64_t gfn)
 	return (write_protected);
 }
 
+/* XXX DEBUG */
+static int is_empty_shadow_page(uint64_t *spt)
+{
+        uint64_t *pos;
+        uint64_t *end;
+
+        for (pos = spt, end = pos + PAGESIZE / sizeof(uint64_t); pos != end; pos++)
+                if (is_shadow_present_pte(*pos)) {
+                        cmn_err(CE_WARN, "%s: %p %lx\n", __func__,
+                               pos, *pos);
+                        return 0;
+                }
+        return 1;
+}
+
 static void
 kvm_mmu_free_page(struct kvm *kvm, struct kvm_mmu_page *sp)
 {
 	ASSERT(mutex_owned(&kvm->mmu_lock));
+
+	ASSERT(is_empty_shadow_page(sp->spt));
 
 	kmem_cache_free(kvm_random_page_thing, sp->sptkma);
 	kmem_cache_free(kvm_random_page_thing, sp->gfnskma);
@@ -763,6 +782,7 @@ mmu_page_remove_parent_pte(struct kvm_mmu_page *sp, uint64_t *parent_pte)
 	int i;
 
 	if (!sp->multimapped) {
+		ASSERT(sp->parent_pte == parent_pte);
 		sp->parent_pte = NULL;
 		return;
 	}
@@ -878,6 +898,9 @@ kvm_mmu_update_unsync_bitmap(uint64_t *spte, struct kvm *kvm)
 	index = spte - sp->spt;
 	if (!__test_and_set_bit(index, sp->unsync_child_bitmap))
 		sp->unsync_children++;
+	if (!sp->unsync_children) {
+		cmn_err(CE_WARN, "%s: !sp->unsync_children\n", __func__);
+	}
 }
 
 static void
@@ -1045,6 +1068,8 @@ kvm_mmu_lookup_page(struct kvm *kvm, gfn_t gfn)
 static void
 kvm_unlink_unsync_page(struct kvm *kvm, struct kvm_mmu_page *sp)
 {
+	if (!sp->unsync)
+		cmn_err(CE_WARN, "%s: !sp->unsync\n", __func__);
 	sp->unsync = 0;
 	KVM_KSTAT_DEC(kvm, kvmks_mmu_unsync_page);
 }
@@ -1335,6 +1360,7 @@ kvm_mmu_unlink_parents(struct kvm *kvm, struct kvm_mmu_page *sp)
 			parent_pte = chain->parent_ptes[0];
 		}
 
+		ASSERT(parent_pte);
 		kvm_mmu_put_page(sp, parent_pte);
 		__set_spte(parent_pte, shadow_trap_nonpresent_pte);
 	}
