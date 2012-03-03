@@ -2791,6 +2791,26 @@ kvm_disable_tdp(void)
 	tdp_enabled = 0;
 }
 
+/* XXX: Lies */
+static ddi_dma_attr_t in_first_4gb = {
+        DMA_ATTR_V0,            /* version of this structure */
+        0,                      /* lowest usable address */
+        0x100000000L,           /* highest usable address (4GB) */
+        0x7fffffff,             /* maximum DMAable byte count */
+        PAGESIZE,               /* alignment in bytes */
+        0x7ff,                  /* burst sizes (any?) */
+        1,                      /* minimum transfer */
+        0xffffffffU,            /* maximum transfer */
+        0xffffffffffffffffULL,  /* maximum segment length */
+        1,                      /* maximum number of segments */
+        1,                      /* granularity */
+        DDI_DMA_FLAGERR,        /* dma_attr_flags */
+};
+
+/* XXX: This is a mess */
+extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
+extern void contig_free(void *, size_t);
+
 static int
 alloc_mmu_pages(struct kvm_vcpu *vcpu)
 {
@@ -2807,12 +2827,15 @@ alloc_mmu_pages(struct kvm_vcpu *vcpu)
 	 * to address this issue...
 	 * XXX - also, don't need to allocate a full page, we'll look
 	 * at htable_t later on solaris.
+	 * XXX - so this REALLY is pretty important and causes serious
+	 *       issues if you don't do it.
 	 */
-	page = alloc_page(KM_SLEEP, &vcpu->arch.mmu.alloc_pae_root);
-	if (!page)
+	vcpu->arch.mmu.alloc_pae_root = contig_alloc(PAGESIZE, &in_first_4gb,
+	    PAGESIZE, 1);
+	if (vcpu->arch.mmu.alloc_pae_root == NULL)
 		return (-ENOMEM);
 
-	vcpu->arch.mmu.pae_root = (uint64_t *)page_address(page);
+	vcpu->arch.mmu.pae_root = (uint64_t *)vcpu->arch.mmu.alloc_pae_root;
 
 	for (i = 0; i < 4; ++i)
 		vcpu->arch.mmu.pae_root[i] = INVALID_PAGE;
@@ -2851,7 +2874,7 @@ kvm_mmu_setup(struct kvm_vcpu *vcpu)
 static void
 free_mmu_pages(struct kvm_vcpu *vcpu)
 {
-	kmem_cache_free(kvm_random_page_thing, vcpu->arch.mmu.alloc_pae_root);
+	contig_free(vcpu->arch.mmu.alloc_pae_root, PAGESIZE);
 }
 
 static void
