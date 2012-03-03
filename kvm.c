@@ -1871,7 +1871,7 @@ kvm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	hardware_disable_all();
 	kvm_arch_hardware_unsetup();
 	kvm_arch_exit();
-	kmem_free(bad_page_kma, PAGESIZE);
+	kmem_cache_free(kvm_random_page_thing, bad_page_kma);
 
 	vmx_fini();
 	mmu_destroy_caches();
