@@ -160,6 +160,8 @@ typedef struct vcpu_vmx {
 	uint32_t exit_reason;
 
 	char rdtscp_enabled;
+
+	uint8_t chapter26_count;
 } vcpu_vmx_t;
 
 static struct vcpu_vmx *
@@ -4126,6 +4128,568 @@ fixup_rmode_irq(struct vcpu_vmx *vmx)
 	    INTR_TYPE_EXT_INTR | vmx->rmode.irq.vector;
 }
 
+static uint64_t
+make_mask(int upper, int lower)
+{
+	int q;
+	uint64_t mask = 0;
+	for (q = upper; q >= lower; q--) {
+		mask |= (1UL << q);
+	}
+	return (mask);
+}
+
+static int
+is_canon(uint64_t addr)
+{
+	uint64_t bits = addr & 0xffff800000000000ULL;
+	return !!(bits == 0xffff800000000000ULL || bits == 0ULL);
+}
+
+void
+vmx_chapter26(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+	if (vmx->chapter26_count > 5)
+		return;
+	vmx->chapter26_count++;
+
+	/*
+	 * Each VM Entry performs the following steps in the order indicated:
+	 *
+	 * 1. Basic checks are performed to ensure the VM entry can commence
+	 *     (see: Section 26.1)
+	 */
+
+	/* 1] If the logical processor is in virtual-8086 mode or compat.
+	 *    mode, an invalid-opcode exception is generated.
+	 *    A: We're in the 64-bit kernel, so surely we're in long mode.
+	 */
+
+	/* 2] If the CPL is non-zero, a #GP is generated.
+	 *    A: We're in the 64-bit kernel, so surely we're in ring zero.
+	 */
+
+	/* 3] If there is no current VMCS, RFLAGS.CF is set 1 and control
+	 *     passes to the next instruction.
+	 *    XXX surely there's a current VMCS?  How would we check?
+	 */
+
+	/* 4a] if there is MOV-SS blocking (see Table 24-3)
+	 *     A: we don't do MOV to SS, et al, one instruction before
+	 *        VMLAUNCH/VMRESUME, so we should be fine
+	 */
+
+	/* 4b] if the VM entry is invoked by LAUNCH and the VMCS launch
+	 *      state is not clear
+	 * 4c] if the VM entry is invoked by RESUME and the VMCS launch
+	 *      state is not set launched
+	 *    A: I'm pretty sure we handle this OK in vmx_vcpu_run()
+	 */
+
+	/* 2. Control- and host-state areas of the VMCS are checked to
+	 *    ensure that they are proper for supporting VMX non-root
+	 *    operation and that the VMCS is correctly configured to support
+	 *    the next VM exit (see: Section 26.2)
+	 */
+
+	/* XXX XXX XXX */
+
+	/* 26.3.1 Checks on the Guest State Area */
+	
+	/* The CR0 field must not set any bit to a value not supported in VMX
+	 *  operation (see Section 23.8).  The following are exceptions:
+	 *    - Bit 0 (CR0.PE) and bit 31 (CR0.PG) are not checked if the
+	 *       unrestricted guest VM-exec control is 1 (see 24.6.2).
+	 *    - Bit 29 (CR0.NW) and bit 30 (CR0.CD) are never checked
+	 *       because the values of these bits are not changed by VM entry
+	 *        (see Section 26.3.2.1)
+	 *
+	 * from 23.8 ...
+	 * should consult VMX cap MSR IA32_VMX_CR0_FIXED{0,1} (Apdx A7) to
+	 * determine how bits in CR0 are set.  
+	 * See Also CR4_FIXED{0,1} (Appendix A8).
+	 *
+	 * from A7...
+	 * Each bit in CR0 is either:
+	 *  - fixed to 0 if it is 0 in both FIXED0, FIXED1
+	 *  - fixed to 1 if it is 1 in both FIXED0, FIXED1
+	 *  - flexible   if it is 0 in FIXED0 and 1 in FIXED1
+	 */
+	{
+		uint64_t cr0 = vmcs_read64(GUEST_CR0);
+		uint64_t cr4 = vmcs_read64(GUEST_CR4);
+		uint64_t cr0fixed0, cr0fixed1;
+		uint64_t cr4fixed0, cr4fixed1;
+
+		rdmsrl(MSR_IA32_VMX_CR0_FIXED0, cr0fixed0);
+		rdmsrl(MSR_IA32_VMX_CR0_FIXED1, cr0fixed1);
+		rdmsrl(MSR_IA32_VMX_CR4_FIXED0, cr4fixed0);
+		rdmsrl(MSR_IA32_VMX_CR4_FIXED1, cr4fixed1);
+
+		#define CR0_SHOULD_BE_1 (cr0fixed0 & cr0fixed1)
+		#define CR0_SHOULD_BE_0 (~cr0fixed0 & ~cr0fixed1)
+		#define CR4_SHOULD_BE_1 (cr4fixed0 & cr4fixed1)
+		#define CR4_SHOULD_BE_0 (~cr4fixed0 & ~cr4fixed1) // ha ha, de morgan
+
+		if ((CR0_SHOULD_BE_1 & cr0) != CR0_SHOULD_BE_1)
+			cmn_err(CE_WARN, "%s: CR0 should-be-one violation\n", __func__);
+		if ((CR0_SHOULD_BE_0 & cr0) != 0)
+			cmn_err(CE_WARN, "%s: CR0 should-be-zero violation\n", __func__);
+		if ((CR4_SHOULD_BE_1 & cr4) != CR4_SHOULD_BE_1)
+			cmn_err(CE_WARN, "%s: CR4 should-be-one violation\n", __func__);
+		if ((CR4_SHOULD_BE_0 & cr4) != 0)
+			cmn_err(CE_WARN, "%s: CR4 should-be-zero violation\n", __func__);
+	}
+
+	/*
+	 * If the "load debug controls" VM-entry control is 1, bits reserved
+	 *  in the IA32_DEBUGCTL MSR must be 0 in the field for that register.
+	 *  The first processors to support VMX supported only the 1-setting
+	 *  of this control and thus performed this check unconditionally.
+	 */
+	{
+		uint32_t ent_ctl = vmcs_read32(VM_ENTRY_CONTROLS);
+
+		if (ent_ctl & (1 << 2)) { /* load debug controls */
+			uint64_t dr7 = vmcs_read64(GUEST_DR7);
+			uint32_t ia32_debugctl_msr = vmcs_read32(GUEST_IA32_DEBUGCTL);
+			if (ia32_debugctl_msr & (make_mask(31, 15) | make_mask(5, 2))) {
+				cmn_err(CE_WARN, "%s: DEBUGCTL reserved bits violation\n", __func__);
+			}
+
+			// XXX which bits are reserved?
+
+	/*
+	 * if the "load debug controls" VM-entry control is 1, bits 63:32
+	 *  in the DR7 field must be 0.  The first processors to support
+	 *  VMX supported only the 1-setting of this control and thus
+	 *  performed this check unconditionally in intel64.
+	 */
+
+			if (dr7 & make_mask(63, 32)) {
+				cmn_err(CE_WARN, "%s: DR7 upper bits violation\n", __func__);
+			}
+	
+		}
+
+	}
+
+	/* if IA32e mode guest VM-entry control is 1, CR0.PG (bit31) and
+	 *   CR4.PAE (bit5) must each be 1.
+	 */
+	/* if IA32e mode guest VM-entry control is 0, CR4.PCIDE (bit17) must be 0
+	 */
+
+	/*
+	 * The CR3 field must be such that bits 63:52 are zero
+	 * Also, bits in 51:32 beyond the physical addr width must be 0
+	 *  ... get the phys addr width with CPUID, EAX 80000008 
+	 *      the width will return in 7:0 of EAX
+	 */
+	{
+		struct cpuid_regs cp;
+		uint64_t cr3 = vmcs_read64(GUEST_CR3);
+		uint64_t mask = make_mask(63, 52);
+		uint64_t addrmask;
+		int addrwidth;
+
+		if (cr3 & mask) {
+			cmn_err(CE_WARN, "%s: CR3 upper non-zero bits!\n", __func__);
+		}
+
+		cp.cp_eax = 0x80000008;
+		cp.cp_ecx = 0;
+		(void) __cpuid_insn(&cp);
+		addrwidth = cp.cp_eax & make_mask(7, 0);
+		addrmask = make_mask(51, addrwidth >= 32 ? addrwidth : 32);
+
+		if (cr3 & addrmask) {
+			cmn_err(CE_WARN, "%s: CR3 addrmask non-zero bits!\n", __func__);
+		}
+	}
+
+	/*
+	 * IA32_SYSENTER_ESP and IA32_SYSENTER_EIP fields must each contain a
+	 *  canonical address
+	 */
+	{
+		uint64_t esp = vmcs_read64(GUEST_SYSENTER_ESP);
+		uint64_t eip = vmcs_read64(GUEST_SYSENTER_EIP);
+
+		if (!is_canon(esp))
+			cmn_err(CE_WARN, "%s: SYSENTER_ESP is non-canon\n", __func__);
+		if (!is_canon(eip))
+			cmn_err(CE_WARN, "%s: SYSENTER_EIP is non-canon\n", __func__);
+	}
+
+	/*
+	 * if the "load IA32_PERF_GLOBAL_CTRL" VM-entry control is 1, bits
+	 * reserved in the IA32_PERF_GLOBAL_CTRL MSR must be 0 in the field
+	 * for that register (see Figure 18-3)
+	 *   appears to be, based on figure:  63:35, 31:2 are all reserved
+	 */
+	{
+		uint32_t ent_ctl = vmcs_read32(VM_ENTRY_CONTROLS);
+
+		if (ent_ctl & (1 << 13)) { /* load PERF_GLOBAL_CTRL */
+			// ? uint64_t msr = vmcs_read64(GUEST_
+			cmn_err(CE_WARN, "%s: PERF_GLOBAL_CTRL is 1\n", __func__);
+		}
+		
+
+	/*
+	 * if the "load IA32_PAT" VM-entry is 1, value of that MSR must be one
+	 *  that could be written by WRMSR without fault at CPL0.
+	 *  that is: each of the 8 bytes in the field must have one of the values
+	 *  0, 1, 4, 5, 6 or 7.
+	 */
+		if (ent_ctl & (1 << 14)) { /* load PAT */
+			int q;
+			uint64_t pat = vmcs_read64(GUEST_IA32_PAT);
+			for (q = 0; q < 8; q++) {
+				uint8_t this = (pat >> (8 * q)) & 0xff;
+				switch (this) {
+					case 0 ... 1:
+					case 4 ... 7:
+						continue;
+					default:
+						cmn_err(CE_WARN, "%s: PAT violation\n", __func__);
+				}
+			}
+		}
+
+
+	/*
+	 * if "load IA32_EFER" is 1, the following must be true:
+	 *   - bits reserved in IA32_EFER MSR must be 0
+	 *   - IA32_EFER.LMA (bit 10) must be eq to value of "IA32e mode guest"
+	 *      VM-exit control.  (exit?)  It must also be identical to
+	 *      IA32_EFER.LME (bit 8) if CR0.PG (bit 31) is 1.
+	 */
+		if (ent_ctl & (1 << 15)) { /* load EFER */
+		}
+
+	}
+
+	/*
+	 * 26.3.1.2 Checks on Guest Segment Registers
+	 *
+	 * This section specifies the checks on the fields for CS, SS, DS, ES,
+	 *  FS, GS, TR, and LDTR.
+	 *
+	 * a register is USABLE is the unusuable bit (bit 16) is 0 in
+	 *  the AR field for that register
+	 */
+
+	/*
+	 * Selector Fields
+	 *  - TR...  the TI flag (bit 2) must be 0
+	 *  - LDTR...  if LDTR is usable, TI flag (bit 2) must be 0
+	 *  - SS... if guest is NOT vm86 then RPL (bits 1:0 ) must eq RPL 
+	 *      of sel for CS
+	 *  XXX assume vm86 mode for now
+	 */
+	{
+		uint32_t tr_ar = vmcs_read32(GUEST_TR_AR_BYTES);
+		uint32_t ldtr_ar = vmcs_read32(GUEST_LDTR_AR_BYTES);
+		uint32_t cs_ar = vmcs_read32(GUEST_CS_AR_BYTES);
+		uint32_t ss_ar = vmcs_read32(GUEST_SS_AR_BYTES);
+		uint32_t ds_ar = vmcs_read32(GUEST_DS_AR_BYTES);
+		uint32_t es_ar = vmcs_read32(GUEST_ES_AR_BYTES);
+		uint32_t fs_ar = vmcs_read32(GUEST_FS_AR_BYTES);
+		uint32_t gs_ar = vmcs_read32(GUEST_GS_AR_BYTES);
+
+		uint64_t ldtr_a = vmcs_read64(GUEST_LDTR_BASE);
+		uint32_t ldtr_l = vmcs_read32(GUEST_LDTR_LIMIT);
+
+		uint64_t tr_a = vmcs_read64(GUEST_TR_BASE);
+		uint16_t tr_s = vmcs_read16(GUEST_TR_SELECTOR);
+		uint32_t tr_l = vmcs_read32(GUEST_TR_LIMIT);
+		uint64_t cs_a = vmcs_read64(GUEST_CS_BASE);
+		uint16_t cs_s = vmcs_read16(GUEST_CS_SELECTOR);
+		uint32_t cs_l = vmcs_read32(GUEST_CS_LIMIT);
+		uint64_t ss_a = vmcs_read64(GUEST_SS_BASE);
+		uint16_t ss_s = vmcs_read16(GUEST_SS_SELECTOR);
+		uint32_t ss_l = vmcs_read32(GUEST_SS_LIMIT);
+		uint64_t ds_a = vmcs_read64(GUEST_DS_BASE);
+		uint16_t ds_s = vmcs_read16(GUEST_DS_SELECTOR);
+		uint32_t ds_l = vmcs_read32(GUEST_DS_LIMIT);
+		uint64_t es_a = vmcs_read64(GUEST_ES_BASE);
+		uint16_t es_s = vmcs_read16(GUEST_ES_SELECTOR);
+		uint32_t es_l = vmcs_read32(GUEST_ES_LIMIT);
+		uint64_t fs_a = vmcs_read64(GUEST_FS_BASE);
+		uint16_t fs_s = vmcs_read16(GUEST_FS_SELECTOR);
+		uint32_t fs_l = vmcs_read32(GUEST_FS_LIMIT);
+		uint64_t gs_a = vmcs_read64(GUEST_GS_BASE);
+		uint16_t gs_s = vmcs_read16(GUEST_GS_SELECTOR);
+		uint32_t gs_l = vmcs_read32(GUEST_GS_LIMIT);
+
+		if (tr_ar & (1 << 2))
+			cmn_err(CE_WARN, "%s: TR AR VIO\n", __func__);
+		if ((ldtr_ar & (1 << 16)) && (ldtr_ar & (1 << 2)))
+			cmn_err(CE_WARN, "%s: LDTR AR VIO\n", __func__);
+
+	/*
+	 * Base Address Fields
+	 *  - CS, SS, DS, ES, FS, GS.  if (vm86) { addr must== sel << 4 }
+	 */
+
+		if (cs_a != (cs_s << 4))
+			cmn_err(CE_WARN, "%s: CS ADDR/SEL VIO\n", __func__);
+		if (ss_a != (ss_s << 4))
+			cmn_err(CE_WARN, "%s: SS ADDR/SEL VIO\n", __func__);
+		if (ds_a != (ds_s << 4))
+			cmn_err(CE_WARN, "%s: DS ADDR/SEL VIO\n", __func__);
+		if (es_a != (es_s << 4))
+			cmn_err(CE_WARN, "%s: ES ADDR/SEL VIO\n", __func__);
+		if (fs_a != (fs_s << 4))
+			cmn_err(CE_WARN, "%s: FS ADDR/SEL VIO\n", __func__);
+		if (gs_a != (gs_s << 4))
+			cmn_err(CE_WARN, "%s: GS ADDR/SEL VIO\n", __func__);
+
+		/* - TR, FS, GS.  The address must be canonical. */
+		if (!is_canon(tr_a))
+			cmn_err(CE_WARN, "%s: TR ADDR NONCANON VIO\n", __func__);
+		if (!is_canon(gs_a))
+			cmn_err(CE_WARN, "%s: GS ADDR NONCANON VIO\n", __func__);
+		if (!is_canon(fs_a))
+			cmn_err(CE_WARN, "%s: FS ADDR NONCANON VIO\n", __func__);
+
+		/* - LDTR. If LDTR is usable, the address must be canonical. */
+		if ((ldtr_ar & (1 << 16)) & !is_canon(ldtr_a))
+			cmn_err(CE_WARN, "%s: LDTR ADDR NONCANON VIO\n", __func__);
+
+		/* CS Bits 63:32 must be zero. */
+		if ((cs_a & make_mask(63, 32)) != 0)
+			cmn_err(CE_WARN, "%s: CS ADDR NON-ZERO BITS VIO\n", __func__);
+
+		/* 
+		 * Limit fields for CS, SS, DS, ES, FS, GS.
+		 * if we're vm86 (XXX assume we are now) then these must be 0xffff
+		 */
+		if (cs_l != 0xffff)
+			cmn_err(CE_WARN, "%s: CS LIMIT VIO\n", __func__);
+		if (ss_l != 0xffff)
+			cmn_err(CE_WARN, "%s: SS LIMIT VIO\n", __func__);
+		if (ds_l != 0xffff)
+			cmn_err(CE_WARN, "%s: DS LIMIT VIO\n", __func__);
+		if (es_l != 0xffff)
+			cmn_err(CE_WARN, "%s: ES LIMIT VIO\n", __func__);
+		if (fs_l != 0xffff)
+			cmn_err(CE_WARN, "%s: FS LIMIT VIO\n", __func__);
+		if (gs_l != 0xffff)
+			cmn_err(CE_WARN, "%s: GS LIMIT VIO\n", __func__);
+
+		/*
+		 * Access rights fields
+		 *   - CS SS DS ES FS GS
+		 *       - if vm86 (XXX assume we are) the field must be 0x000000f3
+		 */
+		if (cs_ar != 0xf3) cmn_err(CE_WARN, "%s: cs AR VIO\n", __func__);
+		if (ss_ar != 0xf3) cmn_err(CE_WARN, "%s: ss AR VIO\n", __func__);
+		if (ds_ar != 0xf3) cmn_err(CE_WARN, "%s: ds AR VIO\n", __func__);
+		if (es_ar != 0xf3) cmn_err(CE_WARN, "%s: es AR VIO\n", __func__);
+		if (fs_ar != 0xf3) cmn_err(CE_WARN, "%s: fs AR VIO\n", __func__);
+		if (gs_ar != 0xf3) cmn_err(CE_WARN, "%s: gs AR VIO\n", __func__);
+
+		/*
+		 *   - TR. Consider the subfields:
+		 *      3:0  if !IA32e mode, type must be 3 (16bit busy TSS) or
+		 *            11 (32bit busy TSS)
+		 *      4 must be 0.
+		 *      7 must be 1.
+		 *      11:8 must be 0.
+		 *      15 ... if any bit in limit field 11:0 is 0, 15 must be 0
+		 *         ... if any bit in limit field 31:20 is 1, 15 must be 1
+		 *      16 must be 0.
+		 *      31:17 must be 0.
+		 */
+		if ((tr_ar & make_mask(3, 0)) != 3 && (tr_ar & make_mask(3, 0)) != 11)
+			cmn_err(CE_WARN, "%s: TR AR TYPE VIO (whole %x type %lu mask %lx)\n", __func__,
+			    tr_ar, (tr_ar & make_mask(3, 0)), make_mask(3, 0));
+		if (tr_ar & (1 << 4))
+			cmn_err(CE_WARN, "%s: TR AR BIT4 VIO\n", __func__);
+		if (!(tr_ar & (1 << 7)))
+			cmn_err(CE_WARN, "%s: TR AR BIT4 VIO\n", __func__);
+		if ((tr_ar & make_mask(11, 8)) >> 8)
+			cmn_err(CE_WARN, "%s: TR AR 11:8 VIO\n", __func__);
+		if ((tr_l & make_mask(11, 0)) != make_mask(11, 0) && (tr_ar & (1 << 15)))
+			cmn_err(CE_WARN, "%s: TR 15 FAIL 11:0 VIO (limit %x limit11:0 %lx ar %x)\n",
+			    __func__, tr_l, tr_l & make_mask(11, 0), tr_ar);
+		if ((tr_l & make_mask(31, 20)) && !(tr_ar & (1 << 15)))
+			cmn_err(CE_WARN, "%s: TR 15 FAIL 31:20 VIO\n", __func__);
+		if (tr_ar & (1 << 16))
+			cmn_err(CE_WARN, "%s: TR AR BIT16 VIO\n", __func__);
+		if (tr_ar & make_mask(31, 17))
+			cmn_err(CE_WARN, "%s: TR AR 31:17 VIO\n", __func__);
+
+		/*
+		 *   - LDTR. If Usable:
+		 *       3:0 must be 2
+		 *       4 must be 0
+		 *       7 must be 1
+		 *       11:8 must be 0
+		 *       15 ... if any bit in limit field 11:0 is 0, 15 must be 0
+		 *          ... if any bit in limit field 31:20 is 1, 15 must be 1
+		 *      31:17 must be 0.
+		 */
+		if ((ldtr_ar & make_mask(3, 0)) != 2)
+			cmn_err(CE_WARN, "%s: LDTR AR TYPE VIO (whole %x type %lu)\n", __func__,
+			    ldtr_ar, (ldtr_ar & make_mask(3, 0)));
+		if (ldtr_ar & (1 << 4))
+			cmn_err(CE_WARN, "%s: LDTR AR BIT4 VIO\n", __func__);
+		if (!(ldtr_ar & (1 << 7)))
+			cmn_err(CE_WARN, "%s: LDTR AR BIT4 VIO\n", __func__);
+		if ((ldtr_ar & make_mask(11, 8)) >> 8)
+			cmn_err(CE_WARN, "%s: LDTR AR 11:8 VIO\n", __func__);
+		if ((ldtr_l & make_mask(11, 0)) != make_mask(11, 0) && (ldtr_ar & (1 << 15)))
+			cmn_err(CE_WARN, "%s: LDTR 15 FAIL 11:0 VIO\n", __func__);
+		if ((ldtr_l & make_mask(31, 20)) && !(ldtr_ar & (1 << 15)))
+			cmn_err(CE_WARN, "%s: LDTR 15 FAIL 31:20 VIO\n", __func__);
+		if (ldtr_ar & make_mask(31, 17))
+			cmn_err(CE_WARN, "%s: LDTR AR 31:17 VIO\n", __func__);
+
+	}
+
+	/*
+	 * 26.3.1.3 Checks on Guest Descriptor-Table Registers
+	 *   GDTR and IDTR:
+	 *     - base addresses must be canonical
+	 *     - 31:16 of each limit field must be 0
+	 */
+	{
+		uint64_t gdtr_base = vmcs_read64(GUEST_GDTR_BASE);
+		uint64_t idtr_base = vmcs_read64(GUEST_IDTR_BASE);
+		uint32_t gdtr_l = vmcs_read32(GUEST_GDTR_LIMIT);
+		uint32_t idtr_l = vmcs_read32(GUEST_IDTR_LIMIT);
+
+		if (!is_canon(gdtr_base))
+			cmn_err(CE_WARN, "%s: GDTR BASE IS NON-CANON\n", __func__);
+		if (!is_canon(idtr_base))
+			cmn_err(CE_WARN, "%s: IDTR BASE IS NON-CANON\n", __func__);
+
+		if (gdtr_l & make_mask(31, 16))
+			cmn_err(CE_WARN, "%s: GDTR LIMIT BITS VIO\n", __func__);
+		if (idtr_l & make_mask(31, 16))
+			cmn_err(CE_WARN, "%s: IDTR LIMIT BITS VIO\n", __func__);
+	}
+
+	/*
+	 * 26.3.1.4 Checks on guest RIP and RFLAGS
+	 *  RIP
+	 *   - bits 63:32 must be 0 if IA-32e VM-entry is 0
+	 *                OR if bit 13 in CS AR is 0
+	 *   - if proc supports N < 64 linear address bits, 63:N must be identical if
+	 *      IA32e mode guest is 1 and the L bit (13) in CS AR is 1.
+	 */
+	{
+		uint64_t rip = vmcs_read64(GUEST_RIP);
+
+		// XXX assume we're not in IA32e guest mode
+		if (rip & make_mask(63, 32))
+			cmn_err(CE_WARN, "%s: RIP ZERO VIO\n", __func__);
+	}
+	/*
+	 *  RFLAGS
+	 *   - bits 63:22, 15, 5 and 3 must be 0 in the field
+	 *   - bit 1 must be 1
+	 *   - VM flag (bit 17) must be 0 if IA32e mode guest is 1,
+	 *          or if bit 0 in CR (PE) is 0
+	 *   - IF flag (bit 9) must be 1 if the valid bit (31) in the VM-entry
+	 *      interruption-information field is 1 and the int. type (bits 10:8) is 
+	 *      external interrupt
+	 */
+	{
+		uint64_t rflags = vmcs_read64(GUEST_RFLAGS);
+		uint32_t intinfo = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
+
+		if ((rflags & make_mask(63, 22)) || (rflags & (1 << 15)) ||
+		    (rflags & (1 << 5)) || (rflags & (1 << 3)))
+			cmn_err(CE_WARN, "%s: RFLAGS ZERO VIO\n", __func__);
+		if (!(rflags & (1 << 1)))
+			cmn_err(CE_WARN, "%s: RFLAGS ONE VIO\n", __func__);
+
+		// external interrupt is type 0
+		if ((intinfo & (1 << 31)) && !(intinfo & make_mask(10, 8)) &&
+		    !(rflags & (1 << 9)))
+			cmn_err(CE_WARN, "%s: RFLAGS INTERRUPT FLAG\n", __func__);
+	}
+
+	/*
+	 * 26.3.1.5 Checks on Guest Non-Register State
+	 *   Activity State
+	 *    - field must contain a value in range 0-3,
+	 *       depending on what MSR IA32_VMX_MISC says (see A.6) is OK
+	 *    - AS must not be HLT if the DPL (bits 6:5) in SS AR is not 0
+	 *    - AS must indicate ACTIVE if interrupt-state field indicates blocking
+	 *         by either MOV-SS or by STI (i.e. either bit 0 or bit 1 in that field is 1)
+	 *    - XXX OH GOD
+	 */
+	{
+		uint32_t actst = vmcs_read32(GUEST_ACTIVITY_STATE);
+                uint64_t vmx_misc;
+		uint32_t ss_ar = vmcs_read32(GUEST_SS_AR_BYTES);
+		uint32_t intinfo = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
+
+                rdmsrl(MSR_IA32_VMX_MISC, vmx_misc);
+		
+		if (((vmx_misc & (1 << 6)) && actst == 1) ||
+		    ((vmx_misc & (1 << 7)) && actst == 2) ||
+		    ((vmx_misc & (1 << 8)) && actst == 3) ||
+		    (actst == 0)) {
+			// valid
+		} else {
+			cmn_err(CE_WARN, "%s: INVALID ACTIVITY STATE %u\n", __func__, actst);
+		}
+
+		if ((ss_ar & make_mask(6, 5)) && actst == 1)
+			cmn_err(CE_WARN, "%s: ACTIVITY STATE HALT + SS_AR VIO\n",
+			    __func__);
+
+		if ((intinfo & make_mask(1, 0)) && actst != 0)
+			cmn_err(CE_WARN, "%s: ACTIVITY STATE !ACTIVE + MOV-SS/STI\n",
+			    __func__);
+
+		if (vmx->chapter26_count < 5)
+			cmn_err(CE_WARN, "%s: ACTIVITY STATE IS %u\n", __func__, actst);
+		
+	}
+
+	/*
+	 * VMCS Link Pointer must be 0xffffffff_ffffffff.
+	 */
+	{
+		uint64_t vlp = vmcs_read64(VMCS_LINK_POINTER);
+		if (vlp != 0xffffffffffffffffULL)
+			cmn_err(CE_WARN, "%s: LINK POINTER VIO -- %lx\n", __func__, vlp);
+	}
+
+	{
+		int q;
+		uint64_t cr3 = vmcs_read64(GUEST_CR3);
+		uint64_t *pdpt, pdt;
+
+		/* reference physical page */
+		if (cr3) {
+			cmn_err(CE_WARN, "%s: CR3 -- %lx\n", __func__, cr3);
+			if (cr3 & PAGEOFFSET) {
+				cmn_err(CE_WARN, "%s: CR3 NOT PAGE ALIGNED!\n", __func__);
+			} else {
+				pdpt = (uint64_t*)page_address(pfn_to_page(cr3 >> PAGESHIFT));
+				if (pdpt) {
+					cmn_err(CE_WARN, "%s: CR3 KPM -- %p\n", __func__, pdpt);
+					for (q = 0; q < 4; q++) {
+						cmn_err(CE_WARN, "%s: CR3 PDPTE%d -- %lx\n", __func__, q, *(pdpt + q));
+					}
+				}
+			}
+		}
+	}
+}
+
+
 #define	R "r"
 #define	Q "q"
 
@@ -4133,6 +4697,10 @@ static void
 vmx_vcpu_run(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
+
+#if 0 /* XXX JMC DEBUG */
+	vmx_chapter26(vcpu);
+#endif
 
 	/* Record the guest's net vcpu time for enforced NMI injections. */
 	if (!cpu_has_virtual_nmis() && vmx->soft_vnmi_blocked)
