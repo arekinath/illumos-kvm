@@ -13,12 +13,9 @@
  * Copyright 2011 Richard Lowe
  */
 
-/*
- * initially we'll replace vmx_{init,fini}
- *   with these, for testing
- */
 extern int kvm_svm_init(void);
 extern void kvm_svm_fini(void);
+extern int kvm_svm_supported(void);
 
 
 enum {

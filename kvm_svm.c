@@ -259,12 +259,11 @@ svm_has(uint32_t feat)
 static int
 cpu_has_svm(const char **msg)
 {
-	if (is_x86_feature(x86_featureset, X86FSET_SVM)) {
-		if (msg)
-			*msg = "svm not available";
+	if (is_x86_feature(x86_featureset, X86FSET_SVM))
 		return (1);
-	}
 
+	if (msg)
+		*msg = "svm not available";
 	return (0);
 }
 
@@ -2804,4 +2803,10 @@ kvm_svm_fini(void)
 	kmem_cache_destroy(kvm_svm_vmcb_cache);
 	kmem_cache_destroy(kvm_svm_msrpm_cache);
 	kmem_cache_destroy(kvm_svm_vcpu_cache);
+}
+
+int
+kvm_svm_supported(void)
+{
+	return (cpu_has_svm(NULL));
 }

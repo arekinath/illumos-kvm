@@ -343,6 +343,13 @@ typedef struct {
 	struct kvm_vcpu *kds_vcpu;	/* pointer to VCPU */
 } kvm_devstate_t;
 
+static kvm_provider_ops_t all_provider_ops[] = {
+	{ vmx_init, vmx_fini, vmx_supported },
+	{ kvm_svm_init, kvm_svm_fini, kvm_svm_supported },
+	{ NULL }
+};
+static kvm_provider_ops_t *kvm_provider_ops = NULL;
+
 /*
  * Globals
  */
@@ -1795,6 +1802,7 @@ zero_constructor(void *buf, void *arg, int tags)
 static int
 kvm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
+	int i;
 	minor_t instance;
 
 	if (kpm_enable == 0) {
@@ -1820,7 +1828,24 @@ kvm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 
 	mutex_init(&kvm_lock, NULL, MUTEX_DRIVER, 0);
-	if (vmx_init() != DDI_SUCCESS) {
+
+	/* Determine which hardware provider to use: */
+	for (i = 0; all_provider_ops[i].provider_supported != NULL; i++) {
+		if (all_provider_ops[i].provider_supported()) {
+			kvm_provider_ops = &all_provider_ops[i];
+			break;
+		}
+	}
+	if (kvm_provider_ops == NULL) {
+		cmn_err(CE_WARN, "no virtualisation hardware support "
+		    "detected\n");
+		ddi_soft_state_fini(&kvm_state);
+		ddi_remove_minor_node(dip, NULL);
+		mutex_destroy(&kvm_lock);
+		return (DDI_FAILURE);
+	}
+
+	if (kvm_provider_ops->provider_init() != DDI_SUCCESS) {
 		ddi_soft_state_fini(&kvm_state);
 		ddi_remove_minor_node(dip, NULL);
 		mutex_destroy(&kvm_lock);
@@ -1834,7 +1859,7 @@ kvm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		ddi_remove_minor_node(dip, NULL);
 		mutex_destroy(&kvm_lock);
 		mutex_destroy(&cpus_hardware_enabled_mp);
-		vmx_fini();
+		kvm_provider_ops->provider_fini();
 		return (DDI_FAILURE);
 	}
 
@@ -1873,7 +1898,7 @@ kvm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	kvm_arch_exit();
 	kmem_cache_free(kvm_random_page_thing, bad_page_kma);
 
-	vmx_fini();
+	kvm_provider_ops->provider_fini();
 	mmu_destroy_caches();
 	mutex_destroy(&cpus_hardware_enabled_mp);
 	mutex_destroy(&kvm_lock);
