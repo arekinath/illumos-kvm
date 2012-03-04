@@ -30,6 +30,7 @@
 #include "kvm_host.h"
 #include "kvm_mmu.h"
 #include "msr-index.h"
+#include "kvm_glue_alloc.h"
 
 /*
  * When setting this variable to true it enables Two-Dimensional-Paging
@@ -2791,26 +2792,6 @@ kvm_disable_tdp(void)
 	tdp_enabled = 0;
 }
 
-/* XXX: Lies */
-static ddi_dma_attr_t in_first_4gb = {
-        DMA_ATTR_V0,            /* version of this structure */
-        0,                      /* lowest usable address */
-        0x100000000L,           /* highest usable address (4GB) */
-        0x7fffffff,             /* maximum DMAable byte count */
-        PAGESIZE,               /* alignment in bytes */
-        0x7ff,                  /* burst sizes (any?) */
-        1,                      /* minimum transfer */
-        0xffffffffU,            /* maximum transfer */
-        0xffffffffffffffffULL,  /* maximum segment length */
-        1,                      /* maximum number of segments */
-        1,                      /* granularity */
-        DDI_DMA_FLAGERR,        /* dma_attr_flags */
-};
-
-/* XXX: This is a mess */
-extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
-extern void contig_free(void *, size_t);
-
 static int
 alloc_mmu_pages(struct kvm_vcpu *vcpu)
 {
@@ -2823,15 +2804,11 @@ alloc_mmu_pages(struct kvm_vcpu *vcpu)
 	 * When emulating 32-bit mode, cr3 is only 32 bits even on x86_64.
 	 * Therefore we need to allocate shadow page tables in the first
 	 * 4GB of memory, which happens to fit the DMA32 zone.
-	 * XXX - for right now, ignore DMA32.  need to use ddi_dma_mem_alloc
-	 * to address this issue...
 	 * XXX - also, don't need to allocate a full page, we'll look
 	 * at htable_t later on solaris.
-	 * XXX - so this REALLY is pretty important and causes serious
-	 *       issues if you don't do it.
 	 */
-	vcpu->arch.mmu.alloc_pae_root = contig_alloc(PAGESIZE, &in_first_4gb,
-	    PAGESIZE, 1);
+	vcpu->arch.mmu.alloc_pae_root = kvm_glue_alloc(PAGESIZE, PAGESIZE,
+	    KVM_ALLOC_LOW4GB);
 	if (vcpu->arch.mmu.alloc_pae_root == NULL)
 		return (-ENOMEM);
 
@@ -2874,7 +2851,7 @@ kvm_mmu_setup(struct kvm_vcpu *vcpu)
 static void
 free_mmu_pages(struct kvm_vcpu *vcpu)
 {
-	contig_free(vcpu->arch.mmu.alloc_pae_root, PAGESIZE);
+	kvm_glue_free(vcpu->arch.mmu.alloc_pae_root, PAGESIZE);
 }
 
 static void

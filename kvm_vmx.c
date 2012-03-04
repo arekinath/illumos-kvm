@@ -34,6 +34,7 @@
 #include "kvm_irq.h"
 #include "kvm_mmu.h"
 #include "kvm_vmx.h"
+#include "kvm_glue_alloc.h"
 
 
 /*
@@ -5149,25 +5150,6 @@ struct kvm_x86_ops vmx_x86_ops = {
 	.rdtscp_supported = vmx_rdtscp_supported
 };
 
-static ddi_dma_attr_t low_4gb_dma_attr = {
-        DMA_ATTR_V0,            /* version of this structure */
-        0,                      /* lowest usable address */
-        0x100000000ULL,         /* highest usable address (4GB) */
-        0x7fffffff,             /* maximum DMAable byte count */
-        PAGESIZE,               /* alignment in bytes */
-        0x7ff,                  /* burst sizes (any?) */
-        1,                      /* minimum transfer */
-        0xffffffffU,            /* maximum transfer */
-        0xffffffffffffffffULL,  /* maximum segment length */
-        1,                      /* maximum number of segments */
-        1,                      /* granularity */
-        DDI_DMA_FLAGERR,        /* dma_attr_flags */
-};
-
-/* XXX: This is a mess */
-extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
-extern void contig_free(void *, size_t);
-
 int
 vmx_init(void)
 {
@@ -5184,22 +5166,22 @@ vmx_init(void)
 	 * 100% positive this is a requirement, but it was alluded
 	 * to in some comments from Joyent.
 	 */
-	vmx_io_bitmap_a = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	vmx_io_bitmap_a = kvm_glue_alloc(PAGESIZE, PAGESIZE, KVM_ALLOC_LOW4GB);
 	if (vmx_io_bitmap_a == NULL) {
 		r = ENOMEM;
 		goto out;
 	}
-	vmx_io_bitmap_b = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	vmx_io_bitmap_b = kvm_glue_alloc(PAGESIZE, PAGESIZE, KVM_ALLOC_LOW4GB);
 	if (vmx_io_bitmap_b == NULL) {
 		r = ENOMEM;
 		goto out;
 	}
-	vmx_msr_bitmap_legacy = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	vmx_msr_bitmap_legacy = kvm_glue_alloc(PAGESIZE, PAGESIZE, KVM_ALLOC_LOW4GB);
 	if (vmx_msr_bitmap_legacy == NULL) {
 		r = ENOMEM;
 		goto out;
 	}
-	vmx_msr_bitmap_longmode = contig_alloc(PAGESIZE, &low_4gb_dma_attr, PAGESIZE, 1);
+	vmx_msr_bitmap_longmode = kvm_glue_alloc(PAGESIZE, PAGESIZE, KVM_ALLOC_LOW4GB);
 	if (vmx_msr_bitmap_longmode == NULL) {
 		r = ENOMEM;
 		goto out;
@@ -5272,13 +5254,13 @@ vmx_init(void)
 
 out:
 	if (vmx_io_bitmap_a != NULL)
-		contig_free(vmx_io_bitmap_a, PAGESIZE);
+		kvm_glue_free(vmx_io_bitmap_a, PAGESIZE);
 	if (vmx_io_bitmap_b != NULL)
-		contig_free(vmx_io_bitmap_b, PAGESIZE);
+		kvm_glue_free(vmx_io_bitmap_b, PAGESIZE);
 	if (vmx_msr_bitmap_legacy != NULL)
-		contig_free(vmx_msr_bitmap_legacy, PAGESIZE);
+		kvm_glue_free(vmx_msr_bitmap_legacy, PAGESIZE);
 	if (vmx_msr_bitmap_longmode != NULL)
-		contig_free(vmx_msr_bitmap_longmode, PAGESIZE);
+		kvm_glue_free(vmx_msr_bitmap_longmode, PAGESIZE);
 
 	kmem_cache_destroy(kvm_vcpu_cache);
 	kmem_cache_destroy(kvm_vmcs_cache);
@@ -5295,10 +5277,10 @@ vmx_fini(void)
 		    vpid_bitmap_words);
 	}
 
-	contig_free(vmx_io_bitmap_a, PAGESIZE);
-	contig_free(vmx_io_bitmap_b, PAGESIZE);
-	contig_free(vmx_msr_bitmap_legacy, PAGESIZE);
-	contig_free(vmx_msr_bitmap_longmode, PAGESIZE);
+	kvm_glue_free(vmx_io_bitmap_a, PAGESIZE);
+	kvm_glue_free(vmx_io_bitmap_b, PAGESIZE);
+	kvm_glue_free(vmx_msr_bitmap_legacy, PAGESIZE);
+	kvm_glue_free(vmx_msr_bitmap_longmode, PAGESIZE);
 
 	kmem_cache_destroy(kvm_vmcs_cache);
 	kmem_cache_destroy(kvm_vcpu_cache);

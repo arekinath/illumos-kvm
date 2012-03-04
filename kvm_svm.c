@@ -36,6 +36,7 @@
 #include "kvm_irq.h"
 #include "kvm_mmu.h"
 #include "kvm_svm.h"
+#include "kvm_glue_alloc.h"
 
 
 #define	__ex(x)	__kvm_handle_fault_on_reboot(x)
@@ -566,40 +567,15 @@ svm_disable_lbrv(struct vcpu_svm *svm)
 	set_msr_interception(msrpm, MSR_IA32_LASTINTTOIP, 0, 0);
 }
 
-/* XXX: Lies */
-static ddi_dma_attr_t iopm_dma_attr = {
-	DMA_ATTR_V0,		/* version of this structure */
-	0,			/* lowest usable address */
-	0xffffffffffffffffULL,	/* highest usable address */
-	0x7fffffff,		/* maximum DMAable byte count */
-	SVM_ALLOC_IOPM_ALIGN,   /* alignment in bytes */
-	0x7ff,			/* burst sizes (any?) */
-	1,			/* minimum transfer */
-	0xffffffffU,		/* maximum transfer */
-	0xffffffffffffffffULL,	/* maximum segment length */
-	1,			/* maximum number of segments */
-	1,			/* granularity */
-	DDI_DMA_FLAGERR,	/* dma_attr_flags */
-};
-
-/* XXX: This is a mess */
-extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
-extern void contig_free(void *, size_t);
-
 static int
 svm_hardware_setup(void)
 {
 	int cpu;
 	int r, i;
 
-	/* XXX: We should be using i_ddi_mem_alloc() to the same end */
-	iopm_va = contig_alloc(SVM_ALLOC_IOPM_SIZE, &iopm_dma_attr,
-	    SVM_ALLOC_IOPM_ALIGN, 1);
-
-	if (iopm_va == NULL) {
-		cmn_err(CE_WARN, "SVM: Failed to allocate contiguous memory");
+	iopm_va = kvm_glue_alloc(SVM_ALLOC_IOPM_SIZE, SVM_ALLOC_IOPM_ALIGN, 0);
+	if (iopm_va == NULL)
 		return (ENOMEM);
-	}
 
 	memset(iopm_va, 0xff, SVM_ALLOC_IOPM_SIZE);
 	iopm_base = kvm_va2pa((caddr_t)iopm_va);
@@ -622,7 +598,7 @@ svm_hardware_setup(void)
 	for (i = 0; i < ncpus; i++) {
 		r = svm_cpu_init(i);
 		if (r) {
-			contig_free(iopm_va, SVM_ALLOC_IOPM_SIZE);
+			kvm_glue_free(iopm_va, SVM_ALLOC_IOPM_SIZE);
 			iopm_base = 0;
 			iopm_va = NULL;
 			return (r);
@@ -655,7 +631,7 @@ svm_hardware_unsetup(void)
 		svm_cpu_uninit(cpu);
 	}
 
-	contig_free(iopm_va, SVM_ALLOC_IOPM_SIZE);
+	kvm_glue_free(iopm_va, SVM_ALLOC_IOPM_SIZE);
 	iopm_base = 0;
 	iopm_va = NULL;
 }
