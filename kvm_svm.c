@@ -233,6 +233,7 @@ struct svm_cpu_data {
 	uint32_t next_asid;
 
 	void *save_area;
+	uint64_t save_area_pa;
 };
 
 static uint32_t svm_features;
@@ -465,7 +466,7 @@ svm_hardware_enable(void *garbage)
 
 	wrmsrl(MSR_EFER, efer | EFER_SVME);
 
-	wrmsrl(MSR_VM_HSAVE_PA, kvm_va2pa((caddr_t)sd->save_area));
+	wrmsrl(MSR_VM_HSAVE_PA, sd->save_area_pa);
 
 	return (0);
 }
@@ -499,6 +500,11 @@ svm_cpu_init(int cpu)
 		kmem_cache_free(kvm_svm_cpudata_cache, sd);
 		return (ENOMEM);
 	}
+	/*
+	 * Store the physical address now so that we don't try and
+	 * take locks we cannot hold in a crosscall later.
+	 */
+	sd->save_area_pa = kvm_va2pa((caddr_t)sd->save_area);
 
 	kvm_svm_cpu_data[cpu] = sd;
 
