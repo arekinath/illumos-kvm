@@ -189,7 +189,8 @@ typedef struct vcpu_svm {
 	char nmi_singlestep;
 } vcpu_svm_t;
 
-static char npt_enabled = 1; /* XXX was for x64 or x86+PAE */
+static int kvm_svm_has_kvm_support_override = 0;
+static char npt_enabled = 1;
 static int npt = 1;
 
 /* module_param(npt, int, S_IRUGO); */
@@ -255,17 +256,6 @@ static char
 svm_has(uint32_t feat)
 {
 	return (!!(svm_features & feat));
-}
-
-static int
-cpu_has_svm(const char **msg)
-{
-	if (is_x86_feature(x86_featureset, X86FSET_SVM))
-		return (1);
-
-	if (msg)
-		*msg = "svm not available";
-	return (0);
 }
 
 static void
@@ -414,16 +404,15 @@ skip_emulated_instruction(struct kvm_vcpu *vcpu)
 }
 
 static int
-has_svm(void)
+kvm_svm_has_kvm_support(void)
 {
-	const char *msg;
+	if (kvm_svm_has_kvm_support_override)
+		return (kvm_svm_has_kvm_support_override > 0 ? 0 : -1);
 
-	if (!cpu_has_svm(&msg)) {
-		cmn_err(CE_NOTE, "has_svm: %s\n", msg);
-		return (-1);
-	}
+	if (is_x86_feature(x86_featureset, X86FSET_SVM))
+		return (0);
 
-	return (0);
+	return (-1);
 }
 
 static void
@@ -444,14 +433,6 @@ svm_hardware_enable(void *garbage)
 	if (efer & EFER_SVME)
 		return (DDI_FAILURE);
 
-	/* XXX surely we already do this check. */
-#if 0
-	if (!has_svm()) {
-		cmn_err(CE_WARN, "svm_hardware_enable: err EOPNOTSUPP "
-		    "on %d\n", cpu);
-		return (DDI_FAILURE);
-	}
-#endif
 	sd = kvm_svm_cpu_data[cpu];
 
 	if (!sd) {
@@ -2657,7 +2638,7 @@ kvm_get_cs_db_l_bits(struct kvm_vcpu *vcpu, int *db, int *l)
 }
 
 static struct kvm_x86_ops svm_x86_ops = {
-	.cpu_has_kvm_support = has_svm,
+	.cpu_has_kvm_support = kvm_svm_has_kvm_support,
 	.disabled_by_bios = is_disabled,
 
 	.hardware_enable = svm_hardware_enable,
@@ -2814,5 +2795,5 @@ kvm_svm_fini(void)
 int
 kvm_svm_supported(void)
 {
-	return (cpu_has_svm(NULL));
+	return (kvm_svm_has_kvm_support() == 0);
 }
