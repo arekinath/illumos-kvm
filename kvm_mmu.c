@@ -2617,8 +2617,7 @@ kvm_mmu_pte_write(struct kvm_vcpu *vcpu, gpa_t gpa,
 
 	for (sp = list_head(bucket); sp; sp = nsp) {
 		/*
-		 * Keep next list node pointer as we may
-		 * free the current one.
+		 * Keep next list node pointer as we may free the current one
 		 */
 		nsp = list_next(bucket, sp);
 
@@ -2641,9 +2640,9 @@ kvm_mmu_pte_write(struct kvm_vcpu *vcpu, gpa_t gpa,
 			 */
 			if (kvm_mmu_zap_page(vcpu->kvm, sp)) {
 				/*
-				 * kvm_mmu_zap_page freed page(s)
-				 * from somewhere in the list, so
-				 * start walking again from the head.
+				 * kvm_mmu_zap_page() freed page(s) from
+				 * somewhere in the list, so start walking
+				 * again from the head.
 				 */
 				nsp = list_head(bucket);
 			}
