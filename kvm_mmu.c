@@ -1146,10 +1146,7 @@ mmu_pages_clear_parents(struct mmu_page_path *parents)
 			return;
 
 		--sp->unsync_children;
-		if ((int)sp->unsync_children < 0)
-			cmn_err(CE_WARN,
-			    "mmu_pages_clear_parents: unsync_children (%d)\n",
-			    (int)sp->unsync_children);
+		VERIFY((int)sp->unsync_children >= 0);
 		__clear_bit(idx, sp->unsync_child_bitmap);
 		level++;
 	} while (level < PT64_ROOT_LEVEL-1 && !sp->unsync_children);
