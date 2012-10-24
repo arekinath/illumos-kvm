@@ -794,8 +794,7 @@ __vmx_load_host_state(struct vcpu_vmx *vmx)
 		 */
 		cli();
 		gsbase = vmcs_readl(HOST_GS_BASE);
-		kvm_load_gs(vmx->host_state.gs_sel);
-		wrmsrl(MSR_GS_BASE, gsbase);
+		SET_GS_GSBASE(vmx->host_state.gs_sel, gsbase);
 		sti();
 	}
 	reload_tss();

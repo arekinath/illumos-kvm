@@ -107,7 +107,8 @@ KERNEL_CFLAGS = \
 	-Wpointer-arith \
 	-gdwarf-2 \
 	-std=gnu99 \
-	-mno-red-zone
+	-mno-red-zone \
+	-msave-args
 
 USER_CFLAGS = \
 	-finline \

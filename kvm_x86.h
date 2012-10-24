@@ -305,4 +305,17 @@ typedef struct kvm_vcpu_events {
 #define	smp_rmb()   __asm__ __volatile__("" ::: "memory")
 #endif
 
+/*
+ * Between the load of GS and the load of GSBASE, GSBASE is esentially
+ * corrupt, and any references to it toxic.  Unfortunately, this will include
+ * any DTrace probes.  Do the whole set in one, inline, operation so that
+ * there cannot be intervening probes.
+ */
+#define	SET_GS_GSBASE(gs, gsbase)					     \
+	do {								     \
+		__asm__ __volatile__("mov %0, %%gs" : : "rm"(gs));	     \
+		__asm__ __volatile__("wrmsr" : : "c" (MSR_GS_BASE),	     \
+		    "a" ((uint32_t)gsbase), "d" ((uint32_t)(gsbase >> 32))); \
+	} while (0)
+
 #endif /* __KVM_X86_H */
