@@ -4857,7 +4857,7 @@ vmx_destroy_vcpu(struct kvm_vcpu *vcpu)
 	vcpu_vmx_t *vmx = to_vmx(vcpu);
 
 	if (vmx->vmcs != NULL) {
-		__vcpu_clear(vmx);
+		vcpu_clear(vmx);
 		kmem_cache_free(kvm_vmcs_cache, vmx->vmcs);
 		vmx->vmcs = NULL;
 	}
