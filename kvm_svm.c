@@ -24,6 +24,7 @@
 #include <sys/xc_levels.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
+#include <sys/machsystm.h>
 
 #include "kvm_bitops.h"
 #include "kvm_msr.h"
@@ -858,7 +859,6 @@ svm_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
 	struct vcpu_svm *svm = to_svm(vcpu);
 	int i;
-	uint64_t tsc_this, delta, new_offset;
 
 	if (cpu != vcpu->cpu) {
 		vcpu->cpu = cpu;
@@ -874,11 +874,7 @@ svm_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		/*
 		 * Make sure the time stamp counter is monotonic.
 		 */
-		rdtscll(tsc_this);
-		if (tsc_this < vcpu->arch.host_tsc) {
-			delta = vcpu->arch.host_tsc - tsc_this;
-			svm->vmcb->control.tsc_offset += delta;
-		}
+		svm->vmcb->control.tsc_offset = tsc_gethrtime_tick_delta();
 	}
 
 	for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++) {
@@ -897,8 +893,6 @@ svm_vcpu_put(struct kvm_vcpu *vcpu)
 	for (i = 0; i < NR_HOST_SAVE_USER_MSRS; i++) {
 		wrmsrl(host_save_user_msrs[i], svm->host_user_msrs[i]);
 	}
-
-	rdtscll(vcpu->arch.host_tsc);
 }
 
 static unsigned long
